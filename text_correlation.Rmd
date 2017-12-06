@@ -1,0 +1,284 @@
+---
+title: "Word Co-Occurrence and Correlation"
+author: "LTC Melanie Vinton"
+date: "August 2, 2017"
+output: dscoemarkdown::dscoe
+---
+
+This tutorial demonstrates a method for creating networks of words from a text source based on their co-occurrence and correlation.  This may give us a sense of word "clustering" in the documents or text.
+
+Much of this is based on the book "Text Mining with R" by Julia Silge and David Robinson.
+
+These methods are applied to free text responses to survey questions collected by the US Army Recruiting Command regarding the concerns of potential applicants in the Army about joining Special Operations.  The data is used here for demonstration purposes and is not available for download.
+
+***
+Many of these methods use the **tidytext** package.  We will also need a few other libraries.  Install that packages if you don't have them already and load them.
+
+```{r warning=FALSE, message=FALSE}
+library(tidytext)
+library(dplyr)
+library(qdap)
+
+```
+
+# Prep the Data
+We read in the data and named the dataframe "text_concern".  Here's some summary information:
+
+```{r echo = FALSE}
+text_concern <- read.csv("ARSOF_Extremely_Concerned_comments.csv", stringsAsFactors =  FALSE)
+colnames(text_concern)<- c("why_concerned")
+```
+
+```{r}
+str(text_concern)
+```
+
+We need an ID column so we can keep track of which words are related to which comments, and thus determine which words occurred together.
+
+```{r}
+text_concern$id <- seq(1,nrow(text_concern))
+```
+
+Next we will break the text into individual words using the `unnest_tokens()` function from the **tidytext** package.  This will create a new data frame with a word and the comment ID for that word on each row. This function also converts the words to lower case by default and punctuation is stripped.
+```{r}
+tidy_text <- unnest_tokens(tbl = text_concern, output = word, input = why_concerned)
+head(tidy_text, 10)
+```
+
+We still need to clean the text to remove stopwords, numbers, and spaces.
+```{r warning=FALSE}
+tidy_text$word <-gsub("\\(?[0-9,.]+\\)?","",tidy_text$word)          # converts numbers to spaces
+tidy_text <- filter(tidy_text, word != "")                           # eliminate rows with just spaces
+data(stop_words)
+tidy_text <- dplyr::anti_join(tidy_text, stop_words)                 # eliminate rows with stopwords
+```
+
+We can use the `count()` function from the **dplyr** package to take a look at the data and see which words are most common.
+```{r}
+count(tidy_text, word, sort= TRUE)
+```
+
+You can also eliminate other words by defining a data frame with those words and using the `anti_join()` function again.  For example, I'll eliminate some letters that may have been associated with numbers, such as "nd" in "82nd" and "th" in "10th".
+```{r warning = FALSE}
+my_stopwords <- data.frame(word = c("nd", "th","st"))
+tidy_text <- anti_join(tidy_text, my_stopwords)
+```
+
+You may need to iterate through this step to eliminate words that you don't want in your visualization.
+
+# Word Co-occurrence
+
+Word co-occurrence examines which words commonly occur together.  We will make use of the **widyr** package, which is only available on github.  As a result, you need to install it from github like this: (install the devtools package if necessary first)
+```{r warning = FALSE, message=FALSE}
+library(devtools)
+#install_github("dgrtwo/widyr")
+library(widyr)
+```
+
+To count the number of times two words occur together in a comment, we will use the `pairwise_count()` function from the **widyr** package.  Note that the order of the words does not matter, so the row with "time" and "family" in that order displayed in the new data frame has also counted occurrences of "family time".
+
+```{r}
+text_pairs <- pairwise_count(tidy_text,word,id,  sort = TRUE, upper = FALSE)
+head(text_pairs)
+```
+
+
+## Co-occurrence Network Visualization
+
+The first step in creating the network visualization of these pairs is to reduce the number of pairs you want to display to make it more readable.  You can see in the "text_pairs" data frame, the most common pair has a count of over 500.  So we'll start with pairs that have a count of at least 150.  You may need to iterate through this step.
+
+```{r}
+text_pairs2 <- filter(text_pairs, n > 150)
+
+```
+
+We will use several new packages to create the visualization.  Install (if needed) and load:
+
+```{r warning = FALSE, message = FALSE}
+library(ggplot2)
+library(igraph)
+library(ggraph)
+```
+
+The `graph_from_data_frame()` function in the **igraph** package creates a network object from the data frame that holds the nodes and edge weight.  The **ggraph** package converts an **igraph** object into a visualization using the grammar graphics, just like the **ggplot2** package, making it easier to create the network visualization.  The following creates the network diagram for the word pairings.
+
+- Three layers are necessary for a basic graph of this type: `geom_edge_link`, 'geom_node_point`, and `geom_node_text`
+- `edge_alpha = n` adjusts the gradient of the color of the line between nodes (called an edge) based on the count of the pairing, captured in the "n" variable of the data frame.
+- `edge_width = n` adjusts the width of the edge based on the "n" variable.
+- `edge_colour = "cyan4"` sets the color of the edge, using a built in color in R.  You can see the full list of colors in base R with the `colors()` function. 
+- `size = 5` sets the size of the node point.  
+- All of these settings can be adjusted to meet your needs.
+
+```{r}
+g <- graph_from_data_frame(text_pairs2)
+g2 <- ggraph(g, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = n, edge_width = n), edge_colour = "cyan4") +
+  geom_node_point(size = 5) +
+  geom_node_text(aes(label = name), repel = TRUE, 
+                 point.padding = unit(0.2, "lines")) +
+  ggtitle("Word pairings in Q6 - Extremely Concerned")+
+  theme_void()
+g2
+
+```
+
+We see a strong clustering around the word "family", which may indicate that responses to this question very often revolved around family concerns.
+
+
+# Word Correlation
+
+Correlation identifies words that are more likely to occur together than with other words.  In co-occurrence, often the most common individual words are also among the most common co-occurring words.  But correlation indicates how often they appear together relative to how often they are separate.  Again, a way to get a sense of clustering. 
+
+Because the number of word pairs can get extremely large, we will first reduce the number of words considered based on how frequent they occur in the data set, in this case more than 50 times.  We only want to consider relatively common words.
+
+If you have not already cleaned the data, run those commands first!
+
+```{r}
+text_cor2 <- filter(group_by(tidy_text, word), n()>50)
+```
+
+Next we will use the `pairwise_cor()` function in the **widyr** package to calculate the correlation coefficient for each pair of words. This function provides the phi coefficient.
+
+```{r}
+text_cor2 <- pairwise_cor(text_cor2, word, id, sort = TRUE, upper = FALSE)
+head(text_cor2)
+```
+
+## Correlation Network Visualization
+
+First we will filter the data for a higher level of correlation.  In this case, we will use 0.3 or more.  Notice the difference in dimensions of the two data frames.
+```{r}
+text_cor3 <- filter(text_cor2, correlation > .3)
+dim(text_cor2)
+dim(text_cor3)
+```
+
+We will use a very similar function for the network visualization as we did with the co-occurrence network,again using the **ggplot2**, **igraph** and **ggraph** packages.  Again, the same layers and parameters apply.
+
+
+```{r}
+c <- graph_from_data_frame(text_cor3)
+
+c2 <- ggraph(c, layout = "fr") +
+  geom_edge_link(aes(edge_width = correlation, edge_alpha = correlation), edge_colour = "royalblue") +
+  geom_node_point(size = 5) +
+  geom_node_text(aes(label = name), repel = TRUE,
+                 point.padding = unit(0.2, "lines")) +
+  ggtitle("Word Correlations for Q6 - Extremely Concerned") +
+  theme_void()
+c2
+```
+
+Notice what happens if we change the minimum correlation value to 0.5.
+```{r}
+text_cor3 <- filter(text_cor2, correlation > .5)
+
+c <- graph_from_data_frame(text_cor3)
+
+c2 <- ggraph(c, layout = "fr") +
+  geom_edge_link(aes(edge_width = correlation, edge_alpha = correlation), edge_colour = "royalblue") +
+  geom_node_point(size = 5) +
+  geom_node_text(aes(label = name), repel = TRUE,
+                 point.padding = unit(0.2, "lines")) +
+  ggtitle("Word Correlations for Q6 - Extremely Concerned") +
+  theme_void()
+c2
+```
+
+
+# Co-occurrence and Correlation on Phrases
+
+The process to do the same analysis and visualization on phrases instead of single words  requires just a minor tweak in the "prep the data" part of the method.  Remember that the pairwise function need an ID indicator to tell it which comment the word (or phrase) comes from.
+
+When we process the raw data and separate out the phrases, we need to include an ID column.  Then the rest of the functions for co-occurrence, correlation, and network visualizations are run the same way.
+
+In this example, we will use 2-word phrases.  We will need the **ngram** and **qdap** libraries.
+```{r warning = FALSE, message = FALSE}
+library(ngram)
+library(qdap)
+```
+
+The next step is to create an empty data frame to hold the results of the analysis called "phrases" and set the number of words in a phrase that you want to analyze. For example, for 2-word phrases set `nwords <- 2`. It is important to reset the phrases data frame to an empty data frame if you rerun the analysis so that new data is not added to old data.  We also need to add a variable for comment ID, called `com_id`. 
+
+```{r}
+## Set up a blank data frame
+phrases <- data.frame()
+
+## Set number of words in a phrase and the com_id variable to 1
+nwords <- 2
+com_id <- 1   
+```
+
+
+Next we use a loop to collect the phrases from the text variable in your data. Notice that stopwords are removed, thus the phrases will involve more informative words but may not adhere to proper English.   
+
+We will start with the original raw data frame, called "text_concern".
+
+```{r}
+## Loop through text to clean it and pull out phrases
+## Populate the phrases data frame
+for (i in text_concern$why_concerned) {
+  str2 <- gsub(' {2,}',' ',i)  #eliminates extra spaces
+  str2 <- tolower(str2)
+  str2 <- qdap::strip(str2)   # eliminates punctuation and numbers
+  str2 <- qdap::rm_stopwords(str2,stopwords = tm::stopwords("english"), separate = FALSE)
+  numwords <- length(strsplit(str2,' ')[[1]])
+  
+  if(numwords >= nwords){
+    gram <- try(ngram(str2, n = nwords))
+    df <- get.phrasetable(gram)  
+    df$id <- com_id         # this is where we add the comment ID info needed by pairwise functions
+    phrases <- rbind(phrases, df)
+  } 
+  com_id <- com_id +1
+}
+
+head(phrases)
+```
+
+Now you can use the "phrases" data frame in the co-occurrence and correlation methods.
+
+## Two-Word Co-occurrence Example
+
+Here's and example of 2-word co-occurrence, indicating the most frequent phrases.
+```{r}
+phrase_pairs <- pairwise_count(phrases, ngrams, id,  sort = TRUE, upper = FALSE)
+phrase_pairs2 <- filter(phrase_pairs, n > 25)
+
+g <- graph_from_data_frame(phrase_pairs2)
+g2 <- ggraph(g, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = n, edge_width = n), edge_colour = "cyan4") +
+  geom_node_point(size = 5) +
+  geom_node_text(aes(label = name), repel = TRUE, 
+                 point.padding = unit(0.2, "lines")) +
+  ggtitle("Phrase pairings in Q6 - Extremely Concerned")+
+  theme_void()
+g2
+```
+
+
+
+## Two-Word Correlation Example
+Here's an example 2-word correlation.
+
+```{r}
+phrase_cor <- filter(group_by(phrases, ngrams), n()>50)
+phrase_cor2 <- pairwise_cor(phrase_cor, ngrams, id, sort = TRUE, upper = FALSE)
+phrase_cor3 <- filter(phrase_cor2, correlation > .3)
+
+c <- graph_from_data_frame(phrase_cor3)
+
+c2 <- ggraph(c, layout = "fr") +
+  geom_edge_link(aes(edge_width = correlation, edge_alpha = correlation), edge_colour = "royalblue") +
+  geom_node_point(size = 5) +
+  geom_node_text(aes(label = name), repel = TRUE,
+                 point.padding = unit(0.2, "lines")) +
+  ggtitle("Phrase Correlations for Q6 - Extremely Concerned") +
+  theme_void()
+c2
+
+```
+
+## Closing
+Hopefully this tutorial provides an example of using text analytics techniques, applied to data inside the Army, but could be applied to any text oriented project.  Specifically, those organizations that deal in survey data that includes free text responses but involve so many responses that it is not feasible for the analyst to read and gain value from the full data set, this hopefully provides an option for dealing with that data.
+
